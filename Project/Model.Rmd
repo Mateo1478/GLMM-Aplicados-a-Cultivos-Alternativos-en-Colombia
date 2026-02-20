@@ -1,0 +1,77 @@
+---
+title: "Aplicación GLMM"
+author: "Mateo Tuberquia Giraldo"
+date: "2026-02-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tibble)
+```
+
+```{r}
+# ================================
+# Cargar objeto desde .RData
+# ================================
+load("dataglmm/datos_glmm.RData")
+glimpse(datos_glmm)
+```
+
+
+```{r}
+
+datosglm_palma <- datos_glmm %>% filter(cultivo=="PALMA DE ACEITE")
+
+modelo_glmm <- glmer(
+  supero_rendimiento ~ ALT + TEMP_MED + produccion + as.numeric(ano) + (1+as.numeric(ano)|municipio),
+  data   = datosglm_palma,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa",
+                         optCtrl = list(maxfun = 2e5))
+)
+summary(modelo_glmm)
+```
+
+```{r}
+
+datos_glmm  %>% filter(cultivo=="PALMA DE ACEITE") %>% ggplot(aes(x=as.numeric(ano), y = rendimiento,colour = municipio))+ geom_line(show.legend = FALSE)
+```
+
+```{r}
+#IDENTIFICAR MUNICIPIOS CON RENDIMIENTO ABSURDO
+datosglm_cafe <- datos_glmm %>% filter(rendimiento>1.116,cultivo=="CAFE")
+#I(ALT/1000) + TEMP_MED + I(produccion/1000)
+```
+
+```{r}
+modelo_binario2 <- glmer(
+  supero_rendimiento ~ I(ALT/1000) + TEMP_MED + I(produccion/1000) +
+                     I(as.numeric(as.character(datosglm_cafe$ano))/1000) +
+                     (1 + I(as.numeric(as.character(datosglm_cafe$ano))/1000) | municipio) ,
+  data = datosglm_cafe,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa")
+)
+summary(modelo_binario2)
+```
+
+```{r}
+datosglm_cafe$ano_num <- as.numeric(as.character(datosglm_cafe$ano))
+datosglm_cafe$ano_c <- scale(datosglm_cafe$ano_num, center = TRUE, scale = FALSE)
+
+modelo_binario2 <- glmer(
+  supero_rendimiento ~ I(ALT/1000) + TEMP_MED + I(produccion/1000) +
+    ano_c +
+    (1 + ano_c | municipio),
+  data = datosglm_cafe,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa")
+)
+
+summary(modelo_binario2)
+```

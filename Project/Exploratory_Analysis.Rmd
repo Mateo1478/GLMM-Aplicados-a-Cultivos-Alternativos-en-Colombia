@@ -1,0 +1,918 @@
+---
+title: "Análisis de cultivos sustitutivos a hoja de coca en Colombia 2007 - 2018"
+author: "Mateo T. Giraldo"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    encoding: UTF-8
+    theme: cosmo
+    highlight: tango
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = T)
+```
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readr)
+library(ggplot2)
+library(DT)
+library(janitor)
+library(scales)
+library(tibble)
+library(knitr)
+library(kableExtra)
+library(sf)
+library(stringi)
+library(stringr)
+library(patchwork)
+library(stringi)
+library(dplyr)
+library(forcats)
+library(writexl)
+library(openxlsx)
+library(lme4)
+library(readxl)
+library(sf)
+
+```
+
+```{r,message=FALSE}
+load("C:/Users/USUARIO/Desktop/TESIS/Import_data/df_agricola.RData")
+# 0) LECTURA DE SHAPEFILES
+#-----------------------------
+# --- Departamentos ---
+colombia_mapa <- st_read("C:/Users/USUARIO/Desktop/TESIS/Project/departamentos/departamentos.shp", quiet = TRUE)
+
+departamentos_mapa <- colombia_mapa %>%
+  mutate(
+    ID_ESPACIA = as.character(ID_ESPACIA),
+    ID_ESPACIA = str_trim(ID_ESPACIA),
+    # Aseguramos dos dígitos, por ejemplo "5" → "05"
+    codigo_dane_departamento = str_pad(ID_ESPACIA, width = 2, pad = "0")
+  )
+
+
+# --- Municipios ---
+municipios_mapa <- st_read("C:/Users/USUARIO/Desktop/TESIS/Project/Municipios/Municipios.shp", quiet = TRUE) %>%
+  mutate(
+    DPTO_CCDGO = as.character(DPTO_CCDGO),
+    MPIO_CCDGO = as.character(MPIO_CCDGO)
+  )
+
+```
+
+```{r}
+cultivos_detalle <- df_agricola %>%
+  # Estandarizar nombres de cultivos
+  mutate(
+    cultivo = str_to_upper(cultivo),                        # Mayúsculas
+    cultivo = stri_trans_general(cultivo, "Latin-ASCII"),
+    municipio = str_to_upper(municipio),                        # Mayúsculas
+    municipio = stri_trans_general(municipio, "Latin-ASCII"),
+    departamento = str_to_upper(departamento),                        # Mayúsculas
+    departamento = stri_trans_general(departamento, "Latin-ASCII")## Quitar tildes (Ej: CAFÉ → CAFE)
+  ) %>%
+  # Filtrar los cultivos sustitutos (todos en mayúscula)
+  filter(cultivo %in% c("CACAO", "CAFE", "PALMA DE ACEITE", "PLATANO", "YUCA")) %>%
+  group_by(ano, cultivo, municipio, departamento,codigo_dane_departamento,codigo_dane_municipio,area_sembrada,area_cosechada) %>%
+  summarise(
+    area_sembrada = sum(area_sembrada, na.rm = TRUE),
+    produccion = sum(produccion, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rendimiento = produccion / area_sembrada,
+    tipo = "Sustituto",
+    ano = as.character(ano)
+  )
+
+cultivos_detalle
+```
+
+```{r}
+# 1) Leer la base de municipios con altura y temperatura
+# Asegúrate de que el archivo esté en el directorio de trabajo o pon la ruta completa
+
+
+# 1) Leer archivo de municipios-altura-temperatura
+mun_alt_temp <- read_excel("C:/Users/USUARIO/Desktop/TESIS/Project/Municipios_Alt_Temp_completado.xlsx")
+
+# 2) Asegurar que las llaves tengan el mismo formato (carácter, 5 dígitos)
+mun_alt_temp <- mun_alt_temp %>%
+  mutate(
+    COD_MUN = as.character(COD_MUN),
+    COD_MUN = str_pad(COD_MUN, width = 5, pad = "0")
+  )
+
+cultivos_detalle <- cultivos_detalle %>%
+  mutate(
+    codigo_dane_municipio = as.character(codigo_dane_municipio),
+    codigo_dane_municipio = str_pad(codigo_dane_municipio, width = 5, pad = "0")
+  )
+
+# 3) Cruce
+cultivos_detalle_completo <- cultivos_detalle %>%
+  left_join(
+    mun_alt_temp %>% select(COD_MUN, ALT, TEMP_MED),
+    by = c("codigo_dane_municipio" = "COD_MUN")
+  )
+
+cultivos_detalle_completo
+```
+
+```{r}
+base <- cultivos_detalle_completo %>%
+  mutate(
+    ano = as.integer(ano),  # solo el año pasa a entero
+    codigo_dane_departamento = str_pad(as.character(codigo_dane_departamento), width = 2, pad = "0"),
+    codigo_dane_municipio = str_pad(as.character(codigo_dane_municipio), width = 5, pad = "0")
+  ) %>%
+  filter(tipo == "Sustituto", ano >= 2008, ano <= 2018)
+
+# Determinar si hay 'area_cosechada' o usar 'area_sembrada'
+usa_area_cosechada <- "area_cosechada" %in% names(base)
+area_var <- if (usa_area_cosechada) "area_cosechada" else "area_sembrada"
+obs_area <- if (usa_area_cosechada) {
+  "Área de tabla = área cosechada (ha)."
+} else {
+  "No se encontró 'area_cosechada'; se usa 'area_sembrada' como aproximación (ha)."
+}
+```
+
+```{r}
+# ---- Opcional: limitar el rango de años del estudio
+year_min <- 2008
+year_max <- 2023
+
+# ---- Paleta de tonos oscuros por cultivo
+colores_cultivos <- c(
+  "CACAO"           = "#5D4037",  # marrón cacao intenso
+  "CAFE"            = "#8B4513",  # café tostado
+  "PALMA DE ACEITE" = "#006400",  # verde selva oscuro
+  "PLATANO"         = "#DAA520",  # dorado plátano
+  "YUCA"            = "#4682B4"   # azul acero para contraste
+)
+
+# ---- Normalizar cultivos a MAYUS y sin tildes
+cd_norm <- cultivos_detalle %>%
+  mutate(
+    ano = as.integer(ano),
+    cultivo = str_to_upper(stri_trans_general(str_squish(cultivo), "Latin-ASCII"))
+  ) %>%
+  filter(ano >= year_min, ano <= year_max)
+
+# ---- Variable de área (cosechada si existe, si no sembrada)
+usa_area_cosechada <- "area_cosechada" %in% names(cd_norm)
+area_var <- if (usa_area_cosechada) "area_cosechada" else "area_sembrada"
+mensaje_area <- if (usa_area_cosechada) {
+  "Área = área cosechada (ha)."
+} else {
+  "No se encontró 'area_cosechada'; se usa 'area_sembrada' como aproximación (ha)."
+}
+message(mensaje_area)
+
+# ---- Agregados por año y cultivo
+ts_prod <- cd_norm %>%
+  group_by(ano, cultivo) %>%
+  summarise(produccion_ton = sum(produccion, na.rm = TRUE), .groups = "drop")
+
+ts_area <- cd_norm %>%
+  group_by(ano, cultivo) %>%
+  summarise(area_ha = sum(.data[[area_var]], na.rm = TRUE), .groups = "drop")
+
+# ---- ORDEN de cultivos (opcional)
+orden_cultivos <- c("CACAO","CAFE","PALMA DE ACEITE","PLATANO","YUCA")
+ts_prod$cultivo <- factor(ts_prod$cultivo, levels = orden_cultivos)
+ts_area$cultivo <- factor(ts_area$cultivo, levels = orden_cultivos)
+
+# Serie de tiempo: Producción
+g_ts_prod <- ggplot(ts_prod, aes(x = ano, y = produccion_ton, color = cultivo)) +
+  geom_line(linewidth = 1.1) +     # ← cambio aquí
+  geom_point(size = 2) +
+  scale_color_manual(values = colores_cultivos, guide = guide_legend(title = "Cultivo")) +
+  scale_x_continuous(breaks = seq(year_min, year_max, by = 1)) +
+  scale_y_continuous(labels = label_number(accuracy = 1, big.mark = ",")) +
+  labs(
+    title = "Serie de tiempo: Producción por cultivo",
+    subtitle = paste0("Unidades: Toneladas (", year_min, "–", year_max, ")"),
+    x = "Año",
+    y = "Producción (Ton)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(g_ts_prod)
+
+
+# Serie de tiempo: Área
+g_ts_area <- ggplot(ts_area, aes(x = ano, y = area_ha, color = cultivo)) +
+  geom_line(linewidth = 1.1) +     # ← cambio aquí
+  geom_point(size = 2) +
+  scale_color_manual(values = colores_cultivos, guide = guide_legend(title = "Cultivo")) +
+  scale_x_continuous(breaks = seq(year_min, year_max, by = 1)) +
+  scale_y_continuous(labels = label_number(accuracy = 1, big.mark = ",")) +
+  labs(
+    title = "Serie de tiempo: Área por cultivo",
+    subtitle = paste0(mensaje_area, " (", year_min, "–", year_max, ")"),
+    x = "Año",
+    y = "Área (ha)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(g_ts_area)
+
+
+# Totales por año (todas las especies)
+tabla_total_anual <- ts_prod %>%
+  group_by(ano) %>%
+  summarise(produccion_total_ton = sum(produccion_ton, na.rm = TRUE), .groups = "drop")
+
+tabla_area_anual <- ts_area %>%
+  group_by(ano) %>%
+  summarise(area_total_ha = sum(area_ha, na.rm = TRUE), .groups = "drop")
+
+print(tabla_total_anual, n = nrow(tabla_total_anual))
+print(tabla_area_anual,  n = nrow(tabla_area_anual))
+
+ggsave("figs/ts_area_por_cultivo.png", g_ts_area, width = 10, height = 7, dpi = 300)
+ggsave("figs/ts_produccion_por_cultivo.png", g_ts_prod, width = 10, height = 7, dpi = 300)
+
+
+```
+
+```{r}
+#-----------------------------
+# 2) DISTRIBUCIÓN % PRODUCCIÓN POR DEPARTAMENTO
+#-----------------------------
+depto_prod <- base %>%
+  group_by(codigo_dane_departamento, departamento) %>%
+  summarise(produccion_ton = sum(produccion, na.rm = TRUE), .groups = "drop") %>%
+  mutate(share = produccion_ton / sum(produccion_ton, na.rm = TRUE))
+
+# Unir con shape corregido
+depto_map <- departamentos_mapa %>%
+  left_join(depto_prod, by = "codigo_dane_departamento")
+
+# --- Gráfico: Mapa porcentual ---
+g_mapa_share <- ggplot(depto_map) +
+  geom_sf(aes(fill = share), color = NA) +
+  scale_fill_gradient(
+    low  = "#e5f5e0",  # verde muy claro
+    high = "#238b45",  # verde oscuro
+    labels = percent_format(accuracy = 0.1),
+    name = "Participación\n% producción"
+  ) +
+  labs(
+    title = "Distribución (%) de la producción de cultivos sustitutos (2008–2023)",
+    subtitle = "Participación por departamento (Ton.)",
+    caption  = "Fuente: Base de cultivos datos abiertos."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right", plot.title = element_text(face = "bold"))
+print(g_mapa_share)
+
+ggsave("figs/mapa_share_produccion_depto.png", g_mapa_share, width = 10, height = 7, dpi = 300)
+
+```
+
+```{r}
+tabla_muni <- base %>%
+  mutate(
+    codigo_dane_municipio = str_pad(as.character(codigo_dane_municipio), 5, pad = "0"),
+    codigo_dane_depto     = str_sub(codigo_dane_municipio, 1, 2)
+  ) %>%
+  group_by(codigo_dane_depto, departamento, codigo_dane_municipio, municipio) %>%
+  summarise(
+    produccion_ton = sum(produccion, na.rm = TRUE),
+    area_ha        = sum(.data[[area_var]], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tot_prod_muni <- sum(tabla_muni$produccion_ton, na.rm = TRUE)
+tot_area_muni <- sum(tabla_muni$area_ha,        na.rm = TRUE)
+
+tabla_muni_fmt <- tabla_muni %>%
+  transmute(
+    Departamento = departamento,
+    Municipio = municipio,
+    `Código DANE municipio` = codigo_dane_municipio,
+    `Producción (millones de toneladas)` = produccion_ton / 1e6,
+    `Participación producción (%)`       = 100 * produccion_ton / tot_prod_muni,
+    `Área (millones de hectáreas)`       = area_ha / 1e6,
+    `Participación área (%)`             = 100 * area_ha / tot_area_muni
+  ) %>%
+  arrange(desc(`Producción (millones de toneladas)`)) %>%
+  mutate(
+    `Participación producción (%)` = round(`Participación producción (%)`, 1),
+    `Participación área (%)`       = round(`Participación área (%)`, 1)
+  )
+
+fila_nac_muni <- tibble(
+  Departamento = "",
+  Municipio = "Nacional",
+  `Código DANE municipio` = "",
+  `Producción (millones de toneladas)` = sum(tabla_muni_fmt$`Producción (millones de toneladas)`, na.rm = TRUE),
+  `Participación producción (%)`       = 100,
+  `Área (millones de hectáreas)`       = sum(tabla_muni_fmt$`Área (millones de hectáreas)`, na.rm = TRUE),
+  `Participación área (%)`             = 100
+)
+
+tabla_muni_nac <- bind_rows(tabla_muni_fmt, fila_nac_muni)
+
+
+# # Mostrar resumen
+# print(obs_area)
+# print(tabla_muni_nac, n = nrow(tabla_muni_nac))
+
+# Guardar en Excel
+if (!dir.exists("tablas")) dir.create("tablas")
+write.xlsx(tabla_muni_nac, "tablas/tabla_municipios_nacional.xlsx", rowNames = FALSE)
+```
+
+```{r}
+#-----------------------------
+# 3) TABLA NACIONAL
+#-----------------------------
+tabla_dept <- base %>%
+  group_by(codigo_dane_departamento, departamento) %>%
+  summarise(
+    produccion_ton = sum(produccion, na.rm = TRUE),
+    area_ha        = sum(.data[[area_var]], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tot_prod <- sum(tabla_dept$produccion_ton, na.rm = TRUE)
+tot_area <- sum(tabla_dept$area_ha,        na.rm = TRUE)
+
+tabla_dept_fmt <- tabla_dept %>%
+  transmute(
+    Departamento = departamento,
+    `Producción (millones de toneladas)` = produccion_ton / 1e6,
+    `Participación producción (%)`       = 100 * produccion_ton / tot_prod,
+    `Área (millones de hectáreas)`       = area_ha / 1e6,
+    `Participación área (%)`             = 100 * area_ha / tot_area
+  ) %>%
+  arrange(desc(`Producción (millones de toneladas)`)) %>%
+  mutate(
+    `Participación producción (%)` = round(`Participación producción (%)`, 1),
+    `Participación área (%)`       = round(`Participación área (%)`, 1)
+  )
+
+fila_nac <- tibble(
+  Departamento = "Nacional",
+  `Producción (millones de toneladas)` = sum(tabla_dept_fmt$`Producción (millones de toneladas)`, na.rm = TRUE),
+  `Participación producción (%)`       = 100,
+  `Área (millones de hectáreas)`       = sum(tabla_dept_fmt$`Área (millones de hectáreas)`, na.rm = TRUE),
+  `Participación área (%)`             = 100
+)
+
+tabla_dept_nac <- bind_rows(tabla_dept_fmt, fila_nac)
+
+print(obs_area)
+print(tabla_dept_nac, n = nrow(tabla_dept_nac))
+library(openxlsx)
+write.xlsx(tabla_dept_nac, "tablas/tabla_dept_nacional.xlsx", rowNames = FALSE)
+
+```
+
+```{r}
+# 4) PROPORCIÓN POR CULTIVO (ÁREA SEMBRADA)
+#-----------------------------
+por_cultivo_area <- base %>%
+  group_by(cultivo) %>%
+  summarise(
+    area_sembrada_ha = sum(area_sembrada, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    share_area = area_sembrada_ha / sum(area_sembrada_ha, na.rm = TRUE)
+  ) %>%
+  arrange(desc(share_area)) %>%
+  mutate(
+    cultivo = fct_reorder(cultivo, share_area)
+  )
+
+colores_cultivos <- c(
+  "CACAO"           = "#5D4037",  # marrón cacao intenso
+  "CAFE"            = "#8B4513",  # café tostado
+  "PALMA DE ACEITE" = "#006400",  # verde selva oscuro
+  "PLATANO"         = "#DAA520",  # dorado plátano
+  "YUCA"            = "#4682B4"   # azul acero para contraste
+)
+
+g_cultivo_share_area <- ggplot(por_cultivo_area,
+                               aes(x = cultivo, y = share_area, fill = cultivo)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(round(share_area * 100, 1), "%")),
+            hjust = -0.1, size = 4, color = "black") +
+  scale_fill_manual(values = colores_cultivos) +
+  coord_flip() +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 0.1),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  labs(
+    title = "Proporción del área sembrada por cultivo (2008–2023)",
+    x = "Cultivo",
+    y = "Participación del área (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold")
+  )
+
+print(g_cultivo_share_area)
+
+ggsave("figs/barras_share_por_cultivo_area.png",
+       g_cultivo_share_area, width = 10, height = 7, dpi = 300)
+
+```
+
+```{r}
+# --- Cultivos objetivo ---
+cultivos_objetivo <- c("CACAO","CAFE","PALMA DE ACEITE","PLATANO","YUCA")
+
+# --- Función general ---
+make_map_and_table_for_crop <- function(crop_name) {
+  df_crop <- base %>%
+    filter(cultivo == crop_name) %>%
+    group_by(codigo_dane_departamento, departamento) %>%
+    summarise(
+      produccion_ton = sum(produccion, na.rm = TRUE),
+      area_ha        = sum(area_sembrada, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  if (nrow(df_crop) == 0) {
+    message(paste0(">>> AVISO — ", crop_name, ": sin registros 2008–2023."))
+    return(invisible(NULL))
+  }
+
+  # --- Totales ---
+  tot_p <- sum(df_crop$produccion_ton, na.rm = TRUE); if (tot_p == 0) tot_p <- 1
+  tot_a <- sum(df_crop$area_ha,        na.rm = TRUE); if (tot_a == 0) tot_a <- 1
+
+  # --- Tabla con porcentajes ---
+  tabla_crop <- df_crop %>%
+    transmute(
+      Departamento = departamento,
+      `Producción (millones de toneladas)` = produccion_ton / 1e6,
+      `Participación producción (%)`       = round(100 * produccion_ton / tot_p, 1),
+      `Área (millones de hectáreas)`       = area_ha / 1e6,
+      `Participación área (%)`             = round(100 * area_ha / tot_a, 1)
+    ) %>%
+    arrange(desc(`Producción (millones de toneladas)`))
+
+  # --- Fila nacional ---
+  fila_nac_c <- tibble(
+    Departamento = paste0("Nacional — ", crop_name),
+    `Producción (millones de toneladas)` = sum(tabla_crop$`Producción (millones de toneladas)`, na.rm = TRUE),
+    `Participación producción (%)`       = 100,
+    `Área (millones de hectáreas)`       = sum(tabla_crop$`Área (millones de hectáreas)`, na.rm = TRUE),
+    `Participación área (%)`             = 100
+  )
+  tabla_crop <- bind_rows(tabla_crop, fila_nac_c)
+
+  message(paste(">>> TABLA —", crop_name, "|", obs_area))
+  print(tabla_crop, n = nrow(tabla_crop))
+
+  # --- Guardar tabla en Excel ---
+  if (!dir.exists("tablas")) dir.create("tablas")
+  write.xlsx(tabla_crop, paste0("tablas/tabla_", tolower(gsub(" ", "_", crop_name)), ".xlsx"), rowNames = FALSE)
+
+  # --- Mapa ---
+  dpto_map_crop <- departamentos_mapa %>%
+    mutate(codigo_dane_departamento = str_pad(as.character(codigo_dane_departamento), 2, pad = "0")) %>%
+    left_join(df_crop %>% select(codigo_dane_departamento, produccion_ton),
+              by = "codigo_dane_departamento") %>%
+    mutate(produccion_ton = replace_na(produccion_ton, 0))
+
+  g_crop <- ggplot(dpto_map_crop) +
+    geom_sf(aes(fill = produccion_ton), color = NA) +
+    scale_fill_gradient(
+      low  = "#e5f5e0",
+      high = "#238b45",
+      labels = label_number(accuracy = 1, big.mark = ","),
+      name = "Producción (Ton.)"
+    ) +
+    labs(
+      title = paste0("Producción de ", crop_name, " por departamento (2008–2023)"),
+      subtitle = "Unidades: Toneladas",
+      caption = "Fuente: Base de cultivos (tipo = 'Sustituto')."
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(face = "bold"))
+
+  print(g_crop)
+
+  # --- Guardar mapa ---
+  if (!dir.exists("figs")) dir.create("figs")
+  ggsave(
+    filename = paste0("figs/mapa_", tolower(gsub(" ", "_", crop_name)), ".png"),
+    plot = g_crop,
+    width = 10, height = 7, dpi = 300
+  )
+}
+
+# --- Ejecutar para los 5 cultivos ---
+invisible(lapply(cultivos_objetivo, make_map_and_table_for_crop))
+```
+
+# ANÁLISIS NIVEL MUNICIPIO
+
+```{r}
+# Crear el indicador de rendimiento
+cultivos_rendimiento1 <- cultivos_detalle_completo %>%
+  filter(ano!="2007") %>% 
+  filter(produccion!=Inf) %>% 
+  arrange(cultivo, ano) %>%
+  group_by(cultivo) %>%
+  mutate(
+    rendimiento_anterior = lag(rendimiento),
+    supero_rendimiento = ifelse(rendimiento >= rendimiento_anterior, 1, 0)
+  ) %>%
+  ungroup()
+
+# Ver el resultado
+print(cultivos_rendimiento1)
+```
+
+```{r}
+# 1) Producción total por departamento (en todo el periodo y todos los cultivos)
+prod_depto_total <- cultivos_rendimiento1 %>%
+  group_by(departamento) %>%
+  summarise(
+    produccion_total = sum(produccion, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    share = produccion_total / sum(produccion_total, na.rm = TRUE)
+  )
+
+# Departamentos que representan más del 1% de la producción nacional
+depto_keep <- prod_depto_total %>%
+  filter(share > 0.01) %>%
+  pull(departamento)
+
+# Base filtrada solo a esos departamentos
+base_filtrada <- cultivos_rendimiento1 %>%
+  filter(departamento %in% depto_keep) %>%
+  mutate(ano = as.integer(ano))
+```
+
+```{r}
+# Producción anual por departamento
+prod_depto_anual <- base_filtrada %>%
+  group_by(ano, departamento) %>%
+  summarise(
+    produccion_total = sum(produccion, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+g_deptos <- ggplot(prod_depto_anual,
+                   aes(x = ano, y = produccion_total, group = departamento)) +
+  geom_line() +
+  geom_point(size = 1.3) +
+  facet_wrap(~ departamento, scales = "free_y") +
+  labs(
+    title = "Producción anual por departamento\n(>1% de la producción nacional)",
+    x = "Año",
+    y = "Producción (toneladas)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold")
+  )
+
+print(g_deptos)
+
+# --- Guardar gráfico ---
+if (!dir.exists("figs")) dir.create("figs")
+
+ggsave(
+  filename = "figs/produccion_anual_por_departamento.png",
+  plot = g_deptos,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+```
+
+```{r}
+top20_mpios <- base_filtrada %>%
+  group_by(municipio) %>%
+  summarise(produccion_total = sum(produccion, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(produccion_total)) %>%
+  slice_head(n = 20) %>%
+  pull(municipio)
+
+prod_mpio_anual_top20 <- base_filtrada %>%
+  filter(municipio %in% top20_mpios) %>%
+  group_by(ano, municipio) %>%
+  summarise(produccion_total = sum(produccion, na.rm = TRUE), .groups = "drop")
+
+g_mpios_top20 <- ggplot(
+  prod_mpio_anual_top20,
+  aes(x = ano, y = produccion_total, group = municipio)
+) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~ municipio, scales = "free_y") +
+  labs(
+    title = "Producción total anual - Top 20 municipios",
+    subtitle = "Municipios con mayor producción acumulada en el período",
+    x = "Año",
+    y = "Producción (toneladas)"
+  ) +
+  theme_minimal(base_size = 8) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold")
+  )
+
+if (!dir.exists("/figs")) dir.create("/figs", recursive = TRUE)
+
+ggsave(
+  filename = "figs/produccion_anual_top20_municipios.png",
+  plot = g_mpios_top20,
+  width = 14,
+  height = 10,
+  dpi = 300
+)
+
+print(g_mpios_top20)
+```
+
+```{r}
+# Partimos de base_filtrada (la de deptos >1%)
+base_sin_inf <- base_filtrada %>%
+  # quitar casos donde producción > 0 y área cosechada = 0
+  filter(!(produccion > 0 & area_cosechada == 0)) %>%
+  # recalcular rendimiento por si acaso
+  mutate(
+    rendimiento = if_else(
+      area_cosechada > 0,
+      produccion / area_cosechada,
+      NA_real_
+    )
+  )
+
+rend_con_flag <- base_sin_inf %>%
+  group_by(cultivo) %>%
+  mutate(
+    Q1  = quantile(rendimiento, 0.25, na.rm = TRUE),
+    Q3  = quantile(rendimiento, 0.75, na.rm = TRUE),
+    IQR = Q3 - Q1,
+    lim_inf  = Q1 - 1.5 * IQR,
+    lim_sup  = Q3 + 1.5 * IQR,
+    absurdo  = rendimiento < lim_inf | rendimiento > lim_sup
+  ) %>%
+  ungroup()
+
+rend_absurdos <- rend_con_flag %>%
+  filter(absurdo == TRUE, !is.na(rendimiento)) %>%
+  arrange(desc(rendimiento)) 
+head(rend_absurdos)
+```
+
+```{r}
+# 1) Filtrar y preparar los datos para el GLMM
+datos_glmm <- cultivos_rendimiento1 %>%
+  # Nos quedamos solo con filas donde todo lo que entra al modelo está definido
+  filter(
+    !is.na(supero_rendimiento),
+    !is.na(ALT),
+    !is.na(TEMP_MED),
+    !is.na(rendimiento_anterior),
+    !is.na(ano),
+    is.finite(ALT),
+    is.finite(TEMP_MED),
+    is.finite(rendimiento_anterior)
+  ) %>%
+  mutate(
+    supero_rendimiento = as.integer(supero_rendimiento),  # 0/1
+    ano       = factor(ano),
+    cultivo   = factor(cultivo),
+    municipio = factor(municipio)
+  )
+save(list = "datos_glmm", file = "dataglmm/datos_glmm.RData")
+
+```
+
+
+```{r}
+Detecoca <- read.csv(
+  "Detección_de_Cultivos_de_Coca.csv",
+  fileEncoding = "UTF-8",
+  stringsAsFactors = FALSE
+)
+glimpse(Detecoca)
+
+```
+
+
+```{r}
+coca_raw <- Detecoca
+year_cols <- names(coca_raw)[str_detect(names(coca_raw), "^X\\d{4}$")]
+
+parse_ha <- function(x) {
+  x <- str_trim(as.character(x))
+  x <- str_replace_all(x, "^-\\s*0$|^-$|^\\-\\s*0(\\,0+|\\.0+)?$", "0")
+  x <- str_replace_all(x, "\\s+", "")
+  
+  # Caso con punto de miles y coma decimal: 1.088,9 -> 1088.9
+  x <- ifelse(str_detect(x, "^\\d{1,3}(\\.\\d{3})+,\\d+$"),
+              str_replace_all(x, "\\.", "") |> str_replace(",", "."),
+              x)
+  
+  # Caso con coma de miles y punto decimal: 1,056.0 -> 1056.0
+  x <- ifelse(str_detect(x, "^\\d{1,3}(,\\d{3})+\\.\\d+$"),
+              str_replace_all(x, ",", ""),
+              x)
+  
+  # Caso con coma decimal simple: 61,5 -> 61.5
+  x <- ifelse(str_detect(x, "^\\d+,\\d+$"),
+              str_replace(x, ",", "."),
+              x)
+  
+  suppressWarnings(as.numeric(x))
+}
+
+coca_long <- coca_raw %>%
+  mutate(
+    CODDEPTO = as.integer(CODDEPTO),
+    CODMPIO  = as.integer(CODMPIO),
+    DEPARTAMENTO = as.character(DEPARTAMENTO),
+    MUNICIPIO    = as.character(MUNICIPIO)
+  ) %>%
+  pivot_longer(
+    cols = all_of(year_cols),
+    names_to = "ano",
+    values_to = "ha_raw"
+  ) %>%
+  mutate(
+    ano = as.integer(str_remove(ano, "^X")),
+    ha  = parse_ha(ha_raw)
+  ) %>%
+  select(CODDEPTO, DEPARTAMENTO, CODMPIO, MUNICIPIO, ano, ha)
+glimpse(coca_long)
+```
+
+
+
+```{r}
+top_mpios <- coca_long %>%
+  group_by(CODMPIO, DEPARTAMENTO, MUNICIPIO) %>%
+  summarise(
+    ha_total = sum(ha, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(ha_total))
+
+top_dptos <- coca_long %>%
+  group_by(DEPARTAMENTO) %>%
+  summarise(
+    ha_total = sum(ha, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(ha_total))
+
+
+if (!dir.exists("tablas")) dir.create("tablas")
+
+openxlsx::write.xlsx(
+  top_mpios,
+  file = "tablas/ha_coca_total_por_municipio.xlsx",
+  rowNames = FALSE
+)
+
+openxlsx::write.xlsx(
+  top_dptos,
+  file = "tablas/ha_coca_total_por_departamento.xlsx",
+  rowNames = FALSE
+)
+```
+
+```{r}
+coca_mpio <- coca_long %>%
+  group_by(CODMPIO, DEPARTAMENTO, MUNICIPIO) %>%
+  summarise(
+    ha_total = sum(ha, na.rm = TRUE),
+    .groups = "drop"
+  )
+coca_mpio <- coca_mpio %>%
+  mutate(
+    CODMPIO = as.character(CODMPIO),
+    CODMPIO = stringr::str_pad(CODMPIO, width = 5, pad = "0")
+  )
+
+top_25 <- coca_mpio %>%
+  arrange(desc(ha_total)) %>%
+  slice_head(n = 25)
+
+if (!dir.exists("tablas")) dir.create("tablas")
+
+openxlsx::write.xlsx(
+  top_25,
+  file = "tablas/ha_total_por_municipio_departamento.xlsx",
+  rowNames = FALSE
+)
+```
+
+
+
+```{r}
+municipios_mapa <- municipios_mapa %>%
+  mutate(
+    codigo_mpio = paste0(
+      stringr::str_pad(DPTO_CCDGO, width = 2, pad = "0"),
+      stringr::str_pad(MPIO_CCDGO, width = 3, pad = "0")
+    )
+  )
+
+mapa_coca_mpio <- municipios_mapa %>%
+  left_join(
+    coca_mpio,
+    by = c("codigo_mpio" = "CODMPIO")
+  )
+
+ggplot(mapa_coca_mpio) +
+  geom_sf(aes(fill = ha_total), color = NA) +
+  scale_fill_gradientn(
+    colours = c("#e5f5e0", "#a1d99b", "#31a354", "#006d2c", "#002b13"),
+    na.value = "grey90",
+    trans = "sqrt",
+    labels = comma
+  ) +
+  labs(
+    title = "Distribución espacial de cultivos de coca en Colombia",
+    subtitle = "Hectáreas acumuladas por municipio",
+    fill = "ha de coca"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank()
+  )
+
+```
+
+```{r}
+lab_k <- function(x) paste0(round(x/1000, 1), "k")
+
+coca_anual <- coca_long %>%
+  group_by(ano) %>%
+  summarise(
+    ha_total = sum(ha, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(ano)
+
+if (!dir.exists("tables")) dir.create("tables")
+if (!dir.exists("figs")) dir.create("figs")
+
+write_xlsx(
+  coca_anual,
+  path = "tablas/serie_coca_por_ano.xlsx"
+)
+
+p <- ggplot(coca_anual, aes(ano, ha_total)) +
+  geom_line(color = "#238b45", linewidth = 1.2) +
+  geom_point(color = "#006d2c", size = 2.5) +
+  geom_text(aes(label = lab_k(ha_total)), vjust = -0.6, size = 3, color = "#00441b") +
+  scale_y_continuous(labels = lab_k) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(
+    title = "Serie de tiempo de cultivos de coca detectados en Colombia",
+    subtitle = "Hectáreas totales por año",
+    x = "Año",
+    y = "Hectáreas (k)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+ggsave(
+  filename = "figs/serie_coca_por_ano.png",
+  plot = p,
+  width = 11,
+  height = 5,
+  dpi = 300
+)
+
+p
+
+```
+
