@@ -16,22 +16,70 @@ Centralizar la documentación, scripts y resultados reproducibles asociados al a
 
 ---
 
+# GLMM Aplicados a Cultivos Alternativos en Colombia
+
+Repositorio de trabajo para la tesis de Maestría en Ciencias – Estadística (Universidad Nacional de Colombia, Sede Medellín):
+
+**“Aplicación de Modelos Lineales Generalizados Mixtos a Cultivos Alternativos a Siembras Ilícitas en Colombia”**
+
+Autor: **Mateo Tuberquia Giraldo**  
+Director: **Ph.D. Mauricio Alejandro Mazo Lopera**  
+Línea: **Modelación Estadística y Aplicaciones**  
+Año: **2026**
+
+---
+
+## Objetivo del repositorio
+
+Centralizar la documentación, scripts y resultados reproducibles asociados al análisis de cultivos alternativos en Colombia mediante **Modelos Lineales Generalizados Mixtos (GLMM)**, incluyendo preparación de datos, exploración, ajuste de modelos, diagnóstico y generación de figuras y tablas.
+
+---
+
 ## Estructura del repositorio
-TESIS/
-├─ data/
-│ ├─ raw/ # datos crudos (si aplica)
-│ └─ processed/ # datos procesados / listos para modelar
-├─ scripts/
-│ ├─ 01_preprocesamiento/ # limpieza, transformaciones, merges
-│ ├─ 02_eda/ # análisis exploratorio, series, mapas
-│ ├─ 03_glmm/ # ajuste de GLMM, selección, validación
-│ └─ 04_outputs/ # exportación de tablas/figuras
-├─ tables/ # tablas exportadas (xlsx/csv)
-├─ figs/ # figuras exportadas (png/pdf)
-├─ latex/ # manuscrito (Overleaf/LaTeX)
+
+```text
+main/
+├─ Import_data/
+│  ├─ Datos_agricola_lect.R
+│  ├─ Evaluaciones_Agropecuarias_Municipales_2007_2018.csv
+│  ├─ Evaluaciones_Agropecuarias_Municipales_2019_2023.csv
+│  └─ df_agricola.RData
+│
+├─ Project/
+│  ├─ Exploratory_Analysis.Rmd
+│  ├─ Model.Rmd
+│  ├─ Detección_de_Cultivos_de_Coca.csv
+│  ├─ Municipios_Alt_Temp_completado.xlsx
+│  │
+│  ├─ dataglmm/
+│  │  └─ datos_glmm.RData
+│  │
+│  ├─ Municipios/
+│  │  ├─ Municipios.shp
+│  │  ├─ Municipios.dbf
+│  │  ├─ Municipios.shx
+│  │  ├─ Municipios.prj
+│  │  ├─ Municipios.cpg
+│  │  └─ Municipios.qmd
+│  │
+│  ├─ departamentos/
+│  │  ├─ departamentos.shp
+│  │  ├─ departamentos.dbf
+│  │  ├─ departamentos.shx
+│  │  ├─ departamentos.prj
+│  │  ├─ departamentos.cpg
+│  │  ├─ departamentos.sbn
+│  │  ├─ departamentos.sbx
+│  │  └─ departamentos.shp.xml
+│  │
+│  ├─ figs/
+│  │  └─ (figuras generadas)
+│  │
+│  └─ tablas/
+│     └─ (tablas generadas)
+│
 └─ README.md
-
-
+```
 > Nota: La estructura puede evolucionar conforme avance la tesis.
 
 ---
